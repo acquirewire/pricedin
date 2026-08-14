@@ -13,6 +13,8 @@ import sys
 import traceback
 from datetime import date, datetime
 
+import pandas as pd
+
 import config
 import db
 
@@ -182,6 +184,47 @@ def main():
     n_scored, e = stage("score + dashboard", do_score)
     if e:
         errors.append(f"score: {e}")
+
+    def do_paper():
+        import paper
+        import report_paper
+        sc = pd.read_pickle(config.RESULTS / "scorecard.pkl")
+        res = paper.run_live(sc, today)
+        log.info("paper: %d closed, %d opened", res["closed"], res["opened"])
+        log.info("\n%s", res["summary"].round(2).to_string(index=False))
+
+        con = paper.connect()
+        try:
+            s = paper.summary(con)
+            curves = {}
+            for b in s["book"]:
+                c = pd.read_sql_query(
+                    "SELECT date, equity FROM equity WHERE book=? ORDER BY date",
+                    con, params=(b,))
+                if not c.empty:
+                    curves[b] = c
+            blotter = pd.read_sql_query(
+                "SELECT book, symbol, side, entry_price, exit_price, exit_date, "
+                "exit_reason, pnl, ret_pct FROM positions WHERE status='closed' "
+                "AND book != 'spy_hold' ORDER BY exit_date DESC, id DESC LIMIT 25",
+                con)
+            span = con.execute(
+                "SELECT MIN(date) a, MAX(date) b FROM equity").fetchone()
+        finally:
+            con.close()
+
+        html = report_paper.build_html(s, curves, blotter, {
+            "generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "period": f"{span['a']} .. {span['b']}" if span and span["a"] else "",
+            "max_concurrent": paper.MAX_CONCURRENT,
+        })
+        (config.RESULTS / "portfolio.html").write_text(html, encoding="utf-8")
+        return res["closed"] + res["opened"]
+
+    # Zero is normal: on most days no tracked name enters or exits.
+    _, e = stage("paper trading", do_paper, allow_zero=True)
+    if e:
+        errors.append(f"paper: {e}")
 
     with db.core_ctx() as con:
         rows = con.execute(

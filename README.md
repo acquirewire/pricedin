@@ -120,6 +120,94 @@ A dashboard that told you what to buy would be more satisfying and less true.
 
 ---
 
+## Trade levels
+
+`levels.py` produces entry, target and stop geometry — with two hard rules built
+in, both of which contradict how this is usually done.
+
+**A stop-loss does not work through an earnings print.** The stock gaps at the
+open and fills you far past your level; a 5% stop on a name that gaps 12% is a
+12% loss. So `through_print` plans carry **no stop at all** and say why. Position
+size is the only risk control that functions across a gap, which is exactly what
+`sizing.py` is for. Stops appear only on `post_print_drift` plans, where you
+enter after the gap has already happened.
+
+**Levels come from predicted move size, expectancy comes from honest odds.** A
+linear model on the stock's own reaction history predicts move *magnitude* with
+correlation 0.40 / 0.40 / 0.42 across train / validate / holdout, monotonic
+across all ten deciles, 4.8× spread between the top and bottom decile. Direction
+gets no such treatment, because it does not survive. Expected value is computed
+from the empirical up-rate for that move size, so most directional plans come
+back marked negative — which is the honest answer, not a broken calculator.
+
+```
+NVDA  reports 2026-08-26 (post)   stance: Leaning unfavourable
+
+  [through_print]    short    EV  -79 bps   (negative expectancy)
+  [post_print_drift] short    EV  -11 bps   (negative expectancy)
+  [premium_sell]     short_vol EV +246 bps  (TRADEABLE)
+```
+
+Only the premium-sell setup clears, which is consistent with the backtest: the
+one finding that survived holdout was about magnitude, and magnitude is what
+option premium prices.
+
+---
+
+## Paper trading
+
+`paper.py` runs six books over the same events with the same costs and sizing.
+Two of them exist purely as yardsticks: `random` takes the same number of trades
+from the same pool at random, and `spy_hold` just buys the index. A book that is
+up has proven nothing until it beats those.
+
+`paper_replay.py` replays the books across the holdout period so the portfolio
+starts with a real curve instead of three months of waiting. Fills come from
+daily OHLC, and **a bar that gaps through a stop fills at the open, not at the
+stop price** — skipping that is how backtests invent money.
+
+### Result over 2024-01 to 2026-08
+
+| Book | Trades | Hit rate | Costs paid | Return | Sharpe |
+|---|---|---|---|---|---|
+| stance_long | 5,638 | 48% | $67,613 | **−32.3%** | −0.61 |
+| stance_short | 2,015 | 48% | $21,257 | −49.0% | −1.83 |
+| drift_long | 2,567 | 46% | $32,237 | −19.0% | −0.70 |
+| cheap_vol | 3,990 | 47% | $47,771 | −48.0% | −2.36 |
+| `random` (control) | 4,733 | 48% | $55,072 | −41.5% | −1.02 |
+| `spy_hold` (benchmark) | 1 | — | $404 | **+69.1%** | 0.62 |
+
+$100k per book, max 20 concurrent positions, 30bps round trip.
+
+**Turnover is what kills it.** `stance_long` paid $67,613 in costs on $100,000
+of capital, at 225× turnover. Run the same replay frictionless and the picture
+inverts:
+
+```bash
+python paper_replay.py --start 2024-01-01 --cost-bps 0 --slippage-bps 0
+```
+
+| Book | Return (0 costs) | vs control |
+|---|---|---|
+| stance_long | **+47.6%** | +34.3 |
+| drift_long | +14.4% | +1.1 |
+| `random` | +13.3% | — |
+| `spy_hold` | +69.5% | — |
+
+So there is a gross edge of roughly 34 points over the control across 2.5 years,
+and costs turn it into a 32% loss — an 80-point swing. Even gross it loses to
+buying SPY and going outside.
+
+**Where the gross edge comes from matters.** The backtest found no directional
+edge on equal-weighted returns, and the hit rate here is 48% — the same coin flip.
+What differs is that positions are **sized by the validated move model**: small in
+volatile names, large in quiet ones. The picking does not work; the sizing does.
+Sharpe 0.81 against the control's 0.35 says the same thing. That is one path over
+one period and has not been through the survivor gate, so treat it as a lead
+worth testing, not a result.
+
+---
+
 ## Avoiding the classic mistakes
 
 **Announcement timing.** A print after Tuesday's close reacts in Wednesday's bar;
@@ -133,8 +221,16 @@ Yahoo's timestamps.
 prices up to `t0`. Reaction slope, beat rate and surprise history are computed
 from strictly earlier prints, never the full series.
 
-**Costs.** 20 bps round-trip charged to every strategy. Several signals are
-positive gross and negative net.
+**Costs.** 20 bps round-trip charged to every strategy, and 30 bps in the paper
+books once slippage is added. Several signals are positive gross and negative
+net; one of them swings 80 percentage points between the two.
+
+**NaN, not None, is the dangerous missing value.** `not float('nan')` is `False`,
+so a NaN passes a truthiness guard, poisons the arithmetic downstream, and then
+gets stored by SQLite as `NULL` — surfacing much later and far from its cause.
+This actually happened: a NaN move estimate produced a NaN position size and a
+position with no quantity, which only blew up two steps later during
+mark-to-market. Everything entering `sizing.py` now goes through a finite check.
 
 **The control.** Described above. It is the reason 14 of 15 strategies were
 rejected before the holdout was ever opened.
@@ -173,8 +269,12 @@ ingest/
 signals/events.py      point-in-time event panel (t0 definition lives here)
 backtest.py            walk-forward + random control + survivor gate
 score.py               three panels, P(beat), rules-based verdict
+levels.py              move-size model, entry/TP/SL geometry, EV gate
 sizing.py              vol targeting (no view) and fractional Kelly (view)
-report.py              single-file HTML dashboard
+paper.py               six-book paper portfolio, OHLC fills with gap handling
+paper_replay.py        replay the books over the holdout period
+report.py              single-file HTML earnings dashboard
+report_paper.py        single-file HTML portfolio dashboard
 daily.py               orchestrator for the cron job
 ```
 

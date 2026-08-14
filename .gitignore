@@ -21,3 +21,7 @@ __pycache__/
 .venv/
 .env
 results/scorecard.pkl
+
+data/paper.db
+data/paper.db-wal
+data/paper.db-shm

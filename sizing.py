@@ -11,9 +11,27 @@ that cleared the backtest gate, and always fractionally.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import config
+
+
+def _finite(v) -> float | None:
+    """NaN is the dangerous input here, not None.
+
+    `not float('nan')` is False, so a NaN sails through a truthiness guard and
+    then poisons every number downstream — and SQLite silently stores the
+    resulting NaN as NULL, so it surfaces much later as a missing value rather
+    than as a loud error. Everything entering this module goes through here.
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 @dataclass
@@ -36,9 +54,12 @@ def vol_target_size(expected_move_pct: float,
                         to a bad day, because earnings moves have fat tails and
                         sizing off the median is how people get hurt.
     """
-    if not expected_move_pct or expected_move_pct <= 0:
-        return SizeResult(0.0, 0.0, "no expected move available",
-                          notes="Cannot size without an implied or realised move.")
+    expected_move_pct = _finite(expected_move_pct)
+    risk_budget_pct = _finite(risk_budget_pct) or 0.0
+    if not expected_move_pct or expected_move_pct <= 0 or risk_budget_pct <= 0:
+        return SizeResult(0.0, 0.0, "no usable expected move",
+                          notes="Cannot size without a finite, positive move "
+                                "estimate and risk budget.")
 
     adverse = expected_move_pct * stress_multiple
     raw = 100.0 * risk_budget_pct / adverse
@@ -62,7 +83,11 @@ def kelly_size(win_prob: float, win_pct: float, loss_pct: float,
                fraction: float = config.KELLY_FRACTION,
                max_position_pct: float = config.MAX_POSITION_PCT) -> SizeResult:
     """Fractional Kelly. Only valid on a backtest-validated edge."""
-    if not (0 < win_prob < 1) or win_pct <= 0 or loss_pct <= 0:
+    win_prob = _finite(win_prob)
+    win_pct = _finite(win_pct)
+    loss_pct = _finite(loss_pct)
+    if (win_prob is None or win_pct is None or loss_pct is None
+            or not (0 < win_prob < 1) or win_pct <= 0 or loss_pct <= 0):
         return SizeResult(0.0, 0.0, "invalid inputs")
 
     b = win_pct / loss_pct

@@ -273,6 +273,23 @@ def replay(start: str, end: str | None = None, starting_cash: float = paper.STAR
 
     rows = []
     for book in books:
+        # Buy-and-hold realises nothing until the final day, so a
+        # realised-P&L curve would draw it as a flat line that jumps at the
+        # end — visually implying the benchmark did nothing for two years.
+        # Mark it to market instead, which is what holding actually looks like.
+        if book == "spy_hold" and spy is not None and not spy.empty:
+            first = spy[spy["date"] >= pd.Timestamp(start)]
+            if not first.empty:
+                qty = starting_cash / float(first.iloc[0]["close"])
+                closes = {str(d)[:10]: float(c)
+                          for d, c in zip(spy["date"], spy["close"])}
+                last_eq = starting_cash
+                for d in all_dates:
+                    if d in closes:
+                        last_eq = qty * closes[d]
+                    rows.append((book, d, 0.0, last_eq, last_eq, 1))
+                continue
+
         t = trades[trades["book"] == book]
         by_date = t.groupby("exit_date")["pnl"].sum().sort_index()
         cum = by_date.cumsum()

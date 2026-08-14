@@ -203,7 +203,26 @@ secret for failure alerts.
 
 The snapshot stage is the one that cannot be recovered if missed — a skipped day
 is a permanent hole in the revision history — so it runs before the optional
-stages and its failures are reported loudly.
+stages, is held to a higher success threshold than the rest, and fails the build
+on its own.
+
+**On silent failure.** The ingest jobs deliberately swallow per-symbol errors so
+one dead ticker cannot stop a 3,000-name sweep. The consequence is that a total
+upstream outage returns `(0, 3000)` and looks exactly like a clean run — which is
+precisely what happened during development when Yahoo rate-limited a burst of
+~7,000 calls, and `daily.py` cheerfully logged "all stages ok" having collected
+nothing. `stage()` now judges stages on their success *rate*, not just on whether
+they threw:
+
+| Stage | Threshold | Zero rows allowed |
+|---|---|---|
+| snapshot | 60% | no — fails the build alone |
+| everything else | 50% | no |
+| prices | 50% | yes (no new bar at weekends) |
+
+A missed snapshot is partially recoverable: `eps_trend` backfills 7/30/60/90 days
+on the next successful run, so a gap noticed within a week closes itself. After
+that it is permanent, which is why the alert names the deadline.
 
 ---
 

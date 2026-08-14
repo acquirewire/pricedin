@@ -19,14 +19,47 @@ import db
 log = logging.getLogger("pricedin.daily")
 
 
-def stage(name: str, fn, *args, **kwargs):
+def _as_ok_fail(res) -> tuple[int, int] | None:
+    """Recognise the (n_ok, n_fail) shape the ingest jobs return."""
+    if (isinstance(res, tuple) and len(res) == 2
+            and all(isinstance(x, int) for x in res)):
+        return res
+    return None
+
+
+def stage(name: str, fn, *args, min_success_rate: float = 0.5,
+          allow_zero: bool = False, **kwargs):
+    """Run a stage and judge whether it actually did anything.
+
+    Catching exceptions is not enough. The ingest jobs swallow per-symbol
+    errors by design — one dead ticker must not stop a 3,000-name sweep — so a
+    total upstream outage returns (0, 3000) and looks like a clean run. That is
+    the worst possible failure mode for the snapshot stage, where a silently
+    missed day is a permanent hole. So a stage that succeeded on fewer than
+    min_success_rate of its attempts is treated as failed.
+    """
     log.info("=" * 60)
     log.info("STAGE: %s", name)
     log.info("=" * 60)
     t0 = datetime.now()
     try:
         out = fn(*args, **kwargs)
-        log.info("%s ok in %.0fs", name, (datetime.now() - t0).total_seconds())
+        secs = (datetime.now() - t0).total_seconds()
+
+        pair = _as_ok_fail(out)
+        if pair is not None:
+            ok, fail = pair
+            total = ok + fail
+            if total and (ok / total) < min_success_rate:
+                raise RuntimeError(
+                    f"only {ok}/{total} succeeded ({ok / total:.0%}), below the "
+                    f"{min_success_rate:.0%} threshold - upstream is probably "
+                    f"rate limiting or down")
+            log.info("%s ok in %.0fs (%d/%d)", name, secs, ok, total)
+        else:
+            if not allow_zero and isinstance(out, int) and out == 0:
+                raise RuntimeError("stage produced 0 rows")
+            log.info("%s ok in %.0fs", name, secs)
         return out, None
     except Exception as e:  # noqa: BLE001
         log.error("%s FAILED: %s", name, e)
@@ -80,9 +113,16 @@ def main():
             log.info("tiering selected %d symbols", len(syms))
             return m_snap.snapshot_symbols(syms, today, args.workers, con)
 
-    res, e = stage("snapshot", do_snapshot)
+    # Held to a higher bar than the other stages: this is the only data that
+    # cannot be re-fetched later. A missed day is partially recoverable, since
+    # eps_trend backfills 7/30/60/90 days on the next successful run, but only
+    # if we notice and rerun inside a week.
+    res, e = stage("snapshot", do_snapshot, min_success_rate=0.6)
     if e:
         errors.append(f"snapshot: {e}")
+        snapshot_failed = True
+    else:
+        snapshot_failed = False
 
     def do_options():
         with db.core_ctx() as con:
@@ -110,7 +150,9 @@ def main():
                 syms = [r["symbol"] for r in con.execute(
                     "SELECT symbol FROM universe WHERE delisted=0")]
             return m_px.ingest_prices(syms + ["SPY"], incremental=True)
-        _, e = stage("prices", do_prices)
+        # Zero new rows is legitimate here: on a weekend or holiday there is
+        # simply no new bar to fetch.
+        _, e = stage("prices", do_prices, allow_zero=True)
         if e:
             errors.append(f"prices: {e}")
 
@@ -155,11 +197,19 @@ def main():
     log.info("scored: %s", n_scored)
     if errors:
         log.warning("completed with %d errors: %s", len(errors), "; ".join(errors))
-        notify("Priced In: run had errors", "\n".join(errors))
+        if snapshot_failed:
+            notify("Priced In: SNAPSHOT MISSED",
+                   "The consensus snapshot did not run. Rerun within 7 days and "
+                   "eps_trend will backfill the gap; after that it is permanent.\n\n"
+                   + "\n".join(errors))
+        else:
+            notify("Priced In: run had errors", "\n".join(errors))
     else:
         log.info("all stages ok")
 
-    return 1 if len(errors) >= 3 else 0
+    # A failed snapshot alone is worth a red build — it is the only stage whose
+    # data cannot be recovered by simply running again later.
+    return 1 if (snapshot_failed or len(errors) >= 3) else 0
 
 
 if __name__ == "__main__":

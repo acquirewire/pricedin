@@ -1,0 +1,18 @@
+# market.db is fully re-downloadable from Yahoo — do not version 6.7M price rows.
+data/market.db
+data/market.db-wal
+data/market.db-shm
+data/core.db-wal
+data/core.db-shm
+data/cache/
+data/events.pkl
+data/_run_*.log
+
+# core.db IS committed: the consensus snapshot history cannot be re-fetched
+# at any price, so it is the one thing worth versioning.
+
+__pycache__/
+*.pyc
+.venv/
+.env
+results/scorecard.pkl

@@ -338,11 +338,39 @@ failures are legible rather than buried.
 
 ## Deployment
 
-`.github/workflows/daily.yml` runs at 09:15 UTC on weekdays, commits the updated
-snapshot archive and dashboard, and caches both databases between runs. On a
-cache miss it rebuilds the snapshot history from the committed archive first,
-so a cold runner never loses accumulated consensus data. Set the `NTFY_TOPIC`
-secret for failure alerts.
+`.github/workflows/daily.yml` runs at 09:15 UTC on weekdays and does the whole
+loop end to end:
+
+1. restores `core.db` and `paper.db` from cache, falling back to the committed
+   archives on a miss
+2. runs `daily.py` — universe, calendar, consensus snapshot, implied moves,
+   history, prices, scoring, paper trading, and the web export
+3. commits `snapshots.csv.gz`, the paper archives and `web/src/data/*.json`
+4. builds the static site and publishes it to GitHub Pages
+
+Step 3 matters more than it looks. The site reads `web/src/data/*.json` at
+**build** time, so refreshing the data without rebuilding leaves the published
+pages showing whatever was true at the last build. Both have to happen, in that
+order, or the site quietly goes stale while every job reports success.
+
+Set the `NTFY_TOPIC` secret for failure alerts, and the `PAGES_BASE_PATH`
+variable to `/<repo-name>` if serving from a project page rather than a custom
+domain.
+
+### What is archived and why
+
+| File | Committed | Reason |
+|---|---|---|
+| `data/snapshots.csv.gz` | yes | consensus as of a past date cannot be re-fetched at any price |
+| `data/paper_equity.csv.gz` | yes | the portfolio curve; small, and drives the chart |
+| `data/paper_history.csv.gz` | yes | live trades only — a decision taken at a given close is unrepeatable |
+| `web/src/data/*.json` | yes | what the site actually reads |
+| `data/core.db`, `market.db`, `paper.db` | no | rebuildable from the above plus Yahoo |
+| replay trades | no | 18,944 rows, 1.3MB, and `paper_replay.py` regenerates them exactly from a fixed seed |
+
+A cold runner with no cache restores from the archives and carries on. This is
+tested: wiping `paper.db` entirely and re-importing returns the identical
+equity curve, live positions and book set.
 
 The snapshot stage is the one that cannot be recovered if missed — a skipped day
 is a permanent hole in the revision history — so it runs before the optional

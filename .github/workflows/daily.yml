@@ -18,6 +18,8 @@ concurrency:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   collect:
@@ -44,12 +46,14 @@ jobs:
           key: pricedin-db-${{ github.run_id }}
           restore-keys: pricedin-db-
 
-      # The archive is the durable copy. On a cache miss this is what stops a
-      # cold runner from losing the snapshot history entirely.
-      - name: Rebuild snapshot history from archive
+      # The archives are the durable copies. On a cache miss these are what
+      # stop a cold runner from silently restarting with no consensus history
+      # and an empty portfolio.
+      - name: Rebuild state from archives
         run: |
           python db.py
           python db.py import
+          python paper.py --import
 
       - name: Run daily collection
         env:
@@ -60,16 +64,24 @@ jobs:
             --workers 4 \
             ${{ inputs.skip_prices && '--skip-prices' || '' }}
 
-      - name: Commit snapshot history
+      - name: Commit data
         run: |
           python db.py export
+          python paper.py --export
           git config user.name  "pricedin-bot"
           git config user.email "actions@github.com"
-          git add data/snapshots.csv.gz results/dashboard.html
+          # web/src/data is what the site actually reads, so it has to be
+          # committed too — otherwise the build publishes yesterday's numbers.
+          git add data/snapshots.csv.gz \
+                  data/paper_history.csv.gz \
+                  data/paper_equity.csv.gz \
+                  results/dashboard.html \
+                  results/portfolio.html \
+                  web/src/data
           if git diff --staged --quiet; then
             echo "no changes"
           else
-            git commit -m "snapshot $(date -u +%Y-%m-%d)"
+            git commit -m "data $(date -u +%Y-%m-%d)"
             git push
           fi
 
@@ -79,3 +91,35 @@ jobs:
           name: dashboard
           path: results/dashboard.html
           retention-days: 30
+
+      # The site reads web/src/data/*.json at BUILD time, so refreshing the
+      # data is not enough on its own — it has to be rebuilt and republished
+      # or the published pages keep showing whatever was true at the last build.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build site
+        working-directory: web
+        env:
+          PAGES_BASE_PATH: ${{ vars.PAGES_BASE_PATH }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/out
+
+  publish:
+    needs: collect
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

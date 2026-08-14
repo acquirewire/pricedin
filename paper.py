@@ -71,7 +71,12 @@ CREATE TABLE IF NOT EXISTS positions (
     gross_pnl       REAL,
     costs           REAL,
     pnl             REAL,
-    ret_pct         REAL
+    ret_pct         REAL,
+    -- 'replay' rows are deterministic output of paper_replay.py and can be
+    -- rebuilt from the event panel at any time. 'live' rows record a decision
+    -- taken at a particular day's close and can never be reconstructed, so
+    -- they are the only ones worth committing.
+    source          TEXT DEFAULT 'live'
 );
 CREATE INDEX IF NOT EXISTS idx_pos_book ON positions(book, status);
 CREATE INDEX IF NOT EXISTS idx_pos_sym  ON positions(symbol, entry_date);
@@ -107,6 +112,11 @@ def connect() -> sqlite3.Connection:
     con = sqlite3.connect(PAPER_DB, timeout=60)
     con.row_factory = sqlite3.Row
     con.executescript(PAPER_SCHEMA)
+    # Migration for databases created before `source` existed.
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(positions)")}
+    if "source" not in cols:
+        con.execute("ALTER TABLE positions ADD COLUMN source TEXT DEFAULT 'live'")
+        con.commit()
     return con
 
 
@@ -213,7 +223,7 @@ def simulate_exit(bars: pd.DataFrame, side: str, tp: float | None,
 def record_trade(con, book: str, symbol: str, side: str, style: str,
                  qty: float, entry_date: str, entry_price: float,
                  exit_fill: Fill, tp: float | None, sl: float | None,
-                 event_date: str | None) -> float:
+                 event_date: str | None, source: str = "replay") -> float:
     """Book a completed round trip and return its net P&L."""
     direction = 1 if side == "long" else -1
     gross = direction * (exit_fill.price - entry_price) * qty
@@ -228,11 +238,11 @@ def record_trade(con, book: str, symbol: str, side: str, style: str,
         """INSERT INTO positions
            (book, symbol, side, style, qty, entry_date, entry_price, tp, sl,
             planned_exit, event_date, status, exit_date, exit_price,
-            exit_reason, gross_pnl, costs, pnl, ret_pct)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?, 'closed', ?,?,?,?,?,?,?)""",
+            exit_reason, gross_pnl, costs, pnl, ret_pct, source)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?, 'closed', ?,?,?,?,?,?,?,?)""",
         (book, symbol, side, style, qty, entry_date, entry_price, tp, sl,
          None, event_date, exit_fill.date, exit_fill.price, exit_fill.reason,
-         gross, costs, pnl, ret),
+         gross, costs, pnl, ret, source),
     )
     return pnl
 
@@ -466,8 +476,8 @@ def open_new(con, px: PriceCache, scorecard: pd.DataFrame, model,
             con.execute(
                 """INSERT INTO positions
                    (book, symbol, side, style, qty, entry_date, entry_price,
-                    tp, sl, planned_exit, event_date, status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?, 'open')""",
+                    tp, sl, planned_exit, event_date, status, source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?, 'open', 'live')""",
                 (book, sym, side, "through_print", qty, today, float(price),
                  None, None, None, str(r["report_date"])[:10]),
             )
@@ -505,12 +515,110 @@ def run_live(scorecard: pd.DataFrame, today: str | None = None) -> dict:
     return {"closed": n_closed, "opened": n_opened, "summary": s}
 
 
+# ------------------------------------------------------------ persistence
+# paper.db is gitignored because it is large and mostly regenerable, but the
+# live trades are not: once a position has been opened at a given day's close,
+# that decision cannot be reconstructed later. Same reasoning as the consensus
+# snapshots — archive the irreplaceable part as a compressed CSV and commit it,
+# so a cache miss on a cold runner cannot silently restart the portfolio at
+# zero and pretend nothing happened.
+PAPER_ARCHIVE = config.DATA / "paper_history.csv.gz"
+EQUITY_ARCHIVE = config.DATA / "paper_equity.csv.gz"
+
+_POS_COLS = [
+    "book", "symbol", "side", "style", "qty", "entry_date", "entry_price",
+    "tp", "sl", "planned_exit", "event_date", "status", "exit_date",
+    "exit_price", "exit_reason", "gross_pnl", "costs", "pnl", "ret_pct",
+    "source",
+]
+_EQ_COLS = ["book", "date", "cash", "positions_value", "equity", "n_open"]
+
+
+def export_archive() -> tuple[int, int]:
+    """Archive the live trades and the full equity curve.
+
+    Replay trades are excluded: 18,944 of them compress to 1.3MB, they would be
+    recommitted every day, and `paper_replay.py` regenerates them exactly from
+    a fixed seed. The equity curve IS kept in full, because it is what the
+    portfolio chart draws and it is only tens of KB.
+    """
+    import csv
+    import gzip
+
+    con = connect()
+    try:
+        pos = con.execute(
+            f"SELECT {', '.join(_POS_COLS)} FROM positions "
+            f"WHERE source = 'live' ORDER BY entry_date, id").fetchall()
+        eq = con.execute(
+            f"SELECT {', '.join(_EQ_COLS)} FROM equity ORDER BY date, book"
+        ).fetchall()
+    finally:
+        con.close()
+
+    for path, cols, rows in ((PAPER_ARCHIVE, _POS_COLS, pos),
+                             (EQUITY_ARCHIVE, _EQ_COLS, eq)):
+        with gzip.open(path, "wt", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(cols)
+            w.writerows([tuple(r) for r in rows])
+    return len(pos), len(eq)
+
+
+def import_archive() -> tuple[int, int]:
+    import csv
+    import gzip
+
+    def read(path, cols):
+        if not path.exists():
+            return []
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            return [
+                tuple(None if r.get(c) in ("", None) else r.get(c) for c in cols)
+                for r in csv.DictReader(fh)
+            ]
+
+    pos = read(PAPER_ARCHIVE, _POS_COLS)
+    eq = read(EQUITY_ARCHIVE, _EQ_COLS)
+
+    con = connect()
+    try:
+        init_books(con)
+        if pos:
+            # Only clear live rows — any replay history already rebuilt on this
+            # runner must survive, since the archive deliberately omits it.
+            con.execute("DELETE FROM positions WHERE source = 'live'")
+            con.executemany(
+                f"INSERT INTO positions ({', '.join(_POS_COLS)}) "
+                f"VALUES ({', '.join('?' * len(_POS_COLS))})", pos)
+        if eq:
+            con.executemany(
+                f"INSERT OR REPLACE INTO equity ({', '.join(_EQ_COLS)}) "
+                f"VALUES ({', '.join('?' * len(_EQ_COLS))})", eq)
+        con.commit()
+    finally:
+        con.close()
+    return len(pos), len(eq)
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                         stream=sys.stdout)
     ap = argparse.ArgumentParser()
     ap.add_argument("--summary", action="store_true")
+    ap.add_argument("--export", action="store_true")
+    ap.add_argument("--import", dest="do_import", action="store_true")
     args = ap.parse_args()
+
+    if args.export:
+        p, e = export_archive()
+        print(f"archived {p} positions, {e} equity rows -> {PAPER_ARCHIVE.name}, "
+              f"{EQUITY_ARCHIVE.name}")
+        return
+    if args.do_import:
+        p, e = import_archive()
+        print(f"restored {p} positions, {e} equity rows")
+        return
 
     con = connect()
     init_books(con)

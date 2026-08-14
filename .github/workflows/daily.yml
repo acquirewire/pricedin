@@ -33,14 +33,23 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # market.db is gitignored, so restore it from cache rather than
-      # re-downloading 6.7M price rows on every run.
-      - name: Restore market data cache
+      # Both databases are gitignored and rebuildable, so restore them from
+      # cache rather than re-downloading millions of rows every run.
+      - name: Restore database cache
         uses: actions/cache@v4
         with:
-          path: data/market.db
-          key: market-db-${{ github.run_id }}
-          restore-keys: market-db-
+          path: |
+            data/market.db
+            data/core.db
+          key: pricedin-db-${{ github.run_id }}
+          restore-keys: pricedin-db-
+
+      # The archive is the durable copy. On a cache miss this is what stops a
+      # cold runner from losing the snapshot history entirely.
+      - name: Rebuild snapshot history from archive
+        run: |
+          python db.py
+          python db.py import
 
       - name: Run daily collection
         env:
@@ -53,9 +62,10 @@ jobs:
 
       - name: Commit snapshot history
         run: |
+          python db.py export
           git config user.name  "pricedin-bot"
           git config user.email "actions@github.com"
-          git add -f data/core.db results/dashboard.html
+          git add data/snapshots.csv.gz results/dashboard.html
           if git diff --staged --quiet; then
             echo "no changes"
           else

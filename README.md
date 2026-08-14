@@ -51,9 +51,19 @@ days ago. So a ticker arrives with a quarter of revision history already attache
 instead of starting empty. First run produced **11,552 rows spanning three
 months** rather than one day. Every run after that extends it forward.
 
-This is why `data/core.db` is committed to git and `data/market.db` is not:
-prices can be re-downloaded from Yahoo any time, consensus-as-of-a-past-date
-cannot be re-fetched at any price.
+Neither SQLite file is committed — both are rebuildable. What *is* committed is
+`data/snapshots.csv.gz`, the append-only record of every consensus reading ever
+observed. It is **127 KB** for the first 11,552 rows, versus 14.5 MB for the
+database that contains them, and it round-trips losslessly:
+
+```bash
+python db.py export     # core.db -> data/snapshots.csv.gz
+python db.py import     # data/snapshots.csv.gz -> core.db
+```
+
+Prices and earnings history can be re-downloaded from Yahoo any time.
+Consensus-as-of-a-past-date cannot be re-fetched at any price. Only the second
+category gets versioned.
 
 ---
 
@@ -149,7 +159,7 @@ rejected before the holdout was ever opened.
 
 ```
 config.py              universe filters, tiering, backtest splits, sizing limits
-db.py                  SQLite schema. core.db (committed) / market.db (not)
+db.py                  SQLite schema + the committed snapshot archive (export/import)
 providers/             all external I/O — swap for a paid feed without touching
   yahoo.py             estimates, earnings history, prices, option chains
   nasdaq.py            universe screener, earnings calendar
@@ -186,7 +196,9 @@ workers.
 ## Deployment
 
 `.github/workflows/daily.yml` runs at 09:15 UTC on weekdays, commits the updated
-`core.db` and dashboard, and caches `market.db` between runs. Set the `NTFY_TOPIC`
+snapshot archive and dashboard, and caches both databases between runs. On a
+cache miss it rebuilds the snapshot history from the committed archive first,
+so a cold runner never loses accumulated consensus data. Set the `NTFY_TOPIC`
 secret for failure alerts.
 
 The snapshot stage is the one that cannot be recovered if missed — a skipped day

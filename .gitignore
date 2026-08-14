@@ -1,15 +1,20 @@
-# market.db is fully re-downloadable from Yahoo — do not version 6.7M price rows.
+# Both SQLite files are rebuildable and neither is versioned. market.db is 6.7M
+# price rows straight from Yahoo; core.db is dominated by earnings_history,
+# which Yahoo will also hand back on request.
+#
+# The one irreplaceable thing — the daily consensus snapshots, which cannot be
+# re-fetched for a past date at any price — is committed as
+# data/snapshots.csv.gz (127 KB and growing slowly), and core.db is rebuilt
+# from it with `python db.py import`.
 data/market.db
 data/market.db-wal
 data/market.db-shm
+data/core.db
 data/core.db-wal
 data/core.db-shm
 data/cache/
 data/events.pkl
 data/_run_*.log
-
-# core.db IS committed: the consensus snapshot history cannot be re-fetched
-# at any price, so it is the one thing worth versioning.
 
 __pycache__/
 *.pyc

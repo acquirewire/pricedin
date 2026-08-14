@@ -165,7 +165,93 @@ def init_all() -> None:
     market().close()
 
 
+# --------------------------------------------------------- snapshot archive
+# The SQLite file itself is a poor thing to commit daily: it is a binary blob
+# dominated by earnings_history, which Yahoo will hand back any time we ask.
+# Only estimate_snapshots is genuinely irreplaceable, so that is what gets
+# versioned — as an append-friendly gzipped CSV that diffs sanely and stays in
+# the low hundreds of KB for years.
+SNAPSHOT_ARCHIVE = config.DATA / "snapshots.csv.gz"
+
+_ARCHIVE_COLS = [
+    "symbol", "snap_date", "period", "eps_avg", "eps_low", "eps_high",
+    "eps_n_analysts", "eps_year_ago", "rev_avg", "rev_n_analysts",
+    "rev_year_ago", "up_7d", "down_7d", "up_30d", "down_30d", "source",
+]
+
+
+def export_snapshots(path: Path | None = None) -> int:
+    """Write the full snapshot history to the committed archive."""
+    import csv
+    import gzip
+
+    path = path or SNAPSHOT_ARCHIVE
+    con = core(init=False)
+    try:
+        rows = con.execute(
+            f"SELECT {', '.join(_ARCHIVE_COLS)} FROM estimate_snapshots "
+            f"ORDER BY snap_date, symbol, period"
+        ).fetchall()
+    finally:
+        con.close()
+
+    with gzip.open(path, "wt", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(_ARCHIVE_COLS)
+        w.writerows([tuple(r) for r in rows])
+    return len(rows)
+
+
+def import_snapshots(path: Path | None = None) -> int:
+    """Rebuild estimate_snapshots from the archive.
+
+    Observed rows win over backfill on conflict, matching the ingest rule, so
+    replaying an archive into a partially-populated database is safe.
+    """
+    import csv
+    import gzip
+
+    path = path or SNAPSHOT_ARCHIVE
+    if not path.exists():
+        return 0
+
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        return 0
+
+    def clean(r):
+        return tuple(
+            None if r.get(c) in ("", None) else r.get(c) for c in _ARCHIVE_COLS
+        )
+
+    con = core()
+    try:
+        con.executemany(
+            f"INSERT INTO estimate_snapshots ({', '.join(_ARCHIVE_COLS)}) "
+            f"VALUES ({', '.join('?' * len(_ARCHIVE_COLS))}) "
+            f"ON CONFLICT(symbol, snap_date, period) DO UPDATE SET "
+            f"  eps_avg = COALESCE(excluded.eps_avg, eps_avg), "
+            f"  source  = CASE WHEN excluded.source='observed' "
+            f"                 THEN 'observed' ELSE source END",
+            [clean(r) for r in rows],
+        )
+        con.commit()
+    finally:
+        con.close()
+    return len(rows)
+
+
 if __name__ == "__main__":
-    init_all()
-    print(f"initialised {config.CORE_DB}")
-    print(f"initialised {config.MARKET_DB}")
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "export":
+        n = export_snapshots()
+        size = SNAPSHOT_ARCHIVE.stat().st_size / 1024
+        print(f"exported {n} snapshot rows -> {SNAPSHOT_ARCHIVE} ({size:.0f} KB)")
+    elif len(sys.argv) > 1 and sys.argv[1] == "import":
+        print(f"imported {import_snapshots()} snapshot rows")
+    else:
+        init_all()
+        print(f"initialised {config.CORE_DB}")
+        print(f"initialised {config.MARKET_DB}")

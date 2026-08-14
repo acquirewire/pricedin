@@ -25,3 +25,11 @@ results/scorecard.pkl
 data/paper.db
 data/paper.db-wal
 data/paper.db-shm
+
+# Next.js front end
+web/node_modules/
+web/.next/
+web/out/
+web/.turbo/
+web/next-env.d.ts
+web/.next-env.d.ts

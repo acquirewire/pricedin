@@ -226,6 +226,27 @@ def main():
     if e:
         errors.append(f"paper: {e}")
 
+    def do_export_web():
+        import export_web
+        model = __import__("levels").load_move_model()
+        out = config.ROOT / "web" / "src" / "data"
+        out.mkdir(parents=True, exist_ok=True)
+        import json
+        payloads = {
+            "events.json": export_web.export_events(model),
+            "portfolio.json": export_web.export_portfolio(),
+            "backtest.json": export_web.export_backtest(),
+            "meta.json": export_web.export_meta(),
+        }
+        for name, data in payloads.items():
+            (out / name).write_text(
+                json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        return len(payloads)
+
+    _, e = stage("export web data", do_export_web)
+    if e:
+        errors.append(f"export_web: {e}")
+
     with db.core_ctx() as con:
         rows = con.execute(
             "SELECT COUNT(*) c FROM estimate_snapshots").fetchone()["c"]

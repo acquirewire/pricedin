@@ -275,7 +275,9 @@ paper.py               six-book paper portfolio, OHLC fills with gap handling
 paper_replay.py        replay the books over the holdout period
 report.py              single-file HTML earnings dashboard
 report_paper.py        single-file HTML portfolio dashboard
+export_web.py          pipeline output -> JSON for the front end
 daily.py               orchestrator for the cron job
+web/                   Next.js front end (see below)
 ```
 
 ### Refresh tiering
@@ -290,6 +292,47 @@ Free APIs are rate limited, so refresh is driven by urgency, not fairness:
 
 A typical weekday selects ~600 names, which finishes in about 90 seconds at 6
 workers.
+
+---
+
+## Front end
+
+`web/` is a Next.js 16 app (React 19, Tailwind 4, shadcn/ui) that reads a static
+JSON snapshot of the pipeline's output. Python stays the source of truth; the
+site has no database and no API to keep alive.
+
+```bash
+python export_web.py          # writes web/src/data/*.json
+cd web && npm run dev         # or `npm run build` for static output
+```
+
+Four routes: the earnings calendar, a per-symbol detail page prerendered for
+every tracked company, the paper portfolio, and the methodology write-up. A
+production build emits 196 static pages.
+
+### Design notes
+
+The brief was to look like research infrastructure rather than a launch page,
+which mostly meant deciding what *not* to do.
+
+- **IBM Plex Sans and Plex Mono.** Institutional rather than promotional, and
+  Plex Mono gives real tabular figures.
+- **Tabular numerals everywhere**, applied globally to table cells rather than
+  remembered per component. Figures that do not line up in a column are the
+  clearest tell of a data product built by someone who does not use one.
+- **Hairline borders, no shadows, 6px radius.** Depth via rules and spacing.
+- **Desaturated red and green.** These appear on hundreds of cells at once;
+  saturated semantics read as a toy.
+- **Missing data renders as an em dash, never as zero.** On a research screen
+  the difference between "we measured zero" and "we have no measurement" is the
+  whole point.
+- **The stance is a dot and a word, not a coloured BUY pill.** The backtest
+  found no directional edge, so a confident badge would be claiming something
+  the evidence does not support.
+
+The methodology page is the one that matters: it leads with the fact that
+nothing survived, and shows the excess-over-control figures per period so the
+failures are legible rather than buried.
 
 ---
 

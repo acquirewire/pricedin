@@ -59,7 +59,10 @@ HTTP_TIMEOUT = 25
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " \
              "(KHTML, like Gecko) Chrome/128.0 Safari/537.36"
-SEC_USER_AGENT = os.environ.get("PRICEDIN_SEC_UA", "pricedin research h.h.shek@lse.ac.uk")
+# SEC asks for a real contact address in the User-Agent on its endpoints. Set
+# PRICEDIN_SEC_UA to your own before using anything that hits sec.gov — the
+# default deliberately carries no personal address, since this repo is public.
+SEC_USER_AGENT = os.environ.get("PRICEDIN_SEC_UA", "pricedin research tool")
 
 # ---------------------------------------------------------------- history
 PRICE_HISTORY_YEARS = 11

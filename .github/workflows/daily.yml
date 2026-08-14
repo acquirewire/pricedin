@@ -13,7 +13,8 @@ on:
         default: false
 
 concurrency:
-  group: pricedin-daily
+  # Shared with deploy.yml so the two workflows never publish at the same time.
+  group: pricedin-pages
   cancel-in-progress: false
 
 permissions:
